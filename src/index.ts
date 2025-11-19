@@ -1,4 +1,5 @@
 import Handler from './handler'
+import { KCRDB } from './kcrdb'
 import SortieHandler from './sortie'
 
 let reporters: Handler[] = []
@@ -18,7 +19,7 @@ export const handleResponse = (e: any) => {
 export const show = false
 
 export const pluginDidLoad = () => {
-  reporters = [new SortieHandler() as Handler]
+  reporters = [new SortieHandler() as Handler, new KCRDB()]
   window.addEventListener('game.response', handleResponse)
 }
 
