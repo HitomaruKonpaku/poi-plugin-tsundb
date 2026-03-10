@@ -3,7 +3,7 @@ import { readJsonSync } from 'fs-extra'
 import _ from 'lodash'
 import fetch from 'node-fetch'
 import { resolve } from 'path'
-import Handler from './handler'
+import Handler, { HandlerDetail } from './handler'
 
 export class KCRDB implements Handler {
   private readonly BASE_URL = 'https://kcrdb.hitomaru.dev'
@@ -24,11 +24,15 @@ export class KCRDB implements Handler {
     'api_state',
   ]
 
+  private readonly REMODEL_SKIP_API_ID = [101, 201, 301]
+
   private readonly appVersion: string
   private readonly pluginName: string
   private readonly pluginVersion: string
 
   private readonly questHashes = new Set()
+
+  private remodelRequestMs?: number
 
   constructor() {
     const pkg = readJsonSync(resolve(__dirname, '../package.json'))
@@ -37,20 +41,61 @@ export class KCRDB implements Handler {
     this.pluginVersion = pkg.version
   }
 
+  //#region global
+
+  public static getJSTDay(ms?: number): number {
+    const date = ms ? new Date(ms) : new Date()
+    date.setUTCHours(date.getUTCHours() + 9)
+    return date.getUTCDay()
+  }
+
   public static hash(s: string, algorithm = 'sha256'): string {
     const res = createHash(algorithm).update(s).digest('hex')
     return res
   }
 
-  public handle(path: string, body: any, postBody: any): void {
+  /**
+   * poi#getStore
+   */
+  public static getStore(): Record<string, any> {
+    return (globalThis as any).getStore() || {}
+  }
+
+  /**
+   * poi#getStore#info
+   */
+  public static getInfo(): Record<string, any> {
+    return KCRDB.getStore().info
+  }
+
+  //#endregion
+
+  public handle(path: string, body: any, postBody: any, detail: HandlerDetail): void {
     const dict: Record<string, any[]> = {
       'api_get_member/questlist': [this.processQuestList],
       'api_req_quest/clearitemget': [this.processClearItemGet],
+
+      'api_req_kousyou/remodel_slotlist': [this.processRemodelSlotList],
+      'api_req_kousyou/remodel_slotlist_detail': [this.processRemodelSlotListDetail],
+      'api_req_kousyou/remodel_slot': [this.processRemodelSlot],
     }
 
     const handlers = dict[path] || []
-    handlers.forEach(handler => handler.call(this, body, postBody))
+    handlers.forEach(handler => handler.call(this, body, postBody, detail))
   }
+
+  public handleRequest(path: string, body: any, postBody: any, detail: HandlerDetail): void {
+    const dict: Record<string, any[]> = {
+      'api_req_kousyou/remodel_slotlist': [this.processRemodelRequest],
+      'api_req_kousyou/remodel_slotlist_detail': [this.processRemodelRequest],
+      'api_req_kousyou/remodel_slot': [this.processRemodelRequest],
+    }
+
+    const handlers = dict[path] || []
+    handlers.forEach(handler => handler.call(this, body, postBody, detail))
+  }
+
+  //#region common
 
   public async send(path: string, data: any) {
     const url = new URL(path, this.BASE_URL)
@@ -73,6 +118,10 @@ export class KCRDB implements Handler {
       }
     }
   }
+
+  //#endregion
+
+  //#region quest
 
   private async processQuestList(body: any) {
     const tmpList = body.api_list
@@ -119,4 +168,92 @@ export class KCRDB implements Handler {
 
     await this.send('quest-items', reqBody)
   }
+
+  //#endregion
+
+  //#region remodel/akashi
+
+  private processRemodelRequest(_: any, __: any, detail: HandlerDetail) {
+    this.remodelRequestMs = detail.time
+  }
+
+  private createRemodelPostBody() {
+    const info = KCRDB.getInfo()
+    const mstShips: Record<string | number, any> = info?.ships || {}
+    const curShips: any[] = info?.fleets?.[0]?.api_ship || []
+    const obj: Record<string, any> = {
+      flag_ship_id: mstShips[curShips[0]]?.api_ship_id || 0,
+      helper_ship_id: mstShips[curShips[1]]?.api_ship_id || 0,
+      day: KCRDB.getJSTDay(this.remodelRequestMs),
+    }
+    return obj
+  }
+
+  /**
+   * On akashi improvement items listed
+   */
+  private async processRemodelSlotList(body: any) {
+    const reqBody = this.createRemodelPostBody()
+    reqBody.data = body
+
+    const canSend = reqBody.flag_ship_id && reqBody.helper_ship_id && reqBody.data
+    if (!canSend) {
+      return
+    }
+
+    await this.send('remodel_slotlist', reqBody)
+  }
+
+  /**
+   * On akashi improvement an item selected
+   */
+  private async processRemodelSlotListDetail(body: any, postBody: any) {
+    const info = KCRDB.getInfo()
+    const reqBody = this.createRemodelPostBody()
+    reqBody.data = body
+    reqBody.api_id = Number(postBody.api_id)
+    const equip = info.equips[postBody.api_slot_id]
+    reqBody.api_slot_id = equip.api_slotitem_id
+    reqBody.api_slot_level = equip.api_level || 0
+
+    const canSend = reqBody.flag_ship_id && reqBody.helper_ship_id && reqBody.data && !this.REMODEL_SKIP_API_ID.includes(reqBody.api_id)
+    if (!canSend) {
+      return
+    }
+
+    await this.send('remodel_slotlist_detail', reqBody)
+  }
+
+  /**
+   * On akashi improvement previously selected procceeded
+   */
+  private async processRemodelSlot(body: any, postBody: any) {
+    const info = KCRDB.getInfo()
+    const reqBody = this.createRemodelPostBody()
+    reqBody.data = body
+    reqBody.api_id = Number(postBody.api_id)
+    const equip = info.equips[postBody.api_slot_id]
+    reqBody.api_slot_id = equip.api_slotitem_id
+    reqBody.api_slot_level = equip.api_level || 0
+    reqBody.api_certain_flag = Number(postBody.api_certain_flag)
+
+    const isSuccess = !!body.api_remodel_flag
+    if (!isSuccess) {
+      return
+    }
+
+    const [idBefore, idAfter] = body.api_remodel_id
+    // Fix item id and stars pre-improvement, since submission run after KC3GearManager's update
+    reqBody.api_slot_id = idBefore
+    reqBody.api_slot_level = idBefore !== idAfter ? 10 : body.api_after_slot.api_level - 1
+
+    const canSend = reqBody.flag_ship_id && reqBody.helper_ship_id && reqBody.data && !this.REMODEL_SKIP_API_ID.includes(reqBody.api_id)
+    if (!canSend) {
+      return
+    }
+
+    await this.send('remodel_slot', reqBody)
+  }
+
+  //#endregion
 }
