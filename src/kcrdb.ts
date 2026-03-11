@@ -24,7 +24,7 @@ export class KCRDB implements Handler {
     'api_state',
   ]
 
-  private readonly REMODEL_SKIP_API_ID = [101, 201, 301]
+  private readonly REMODEL_SKIP_API_ID = [101, 201, 301, 306]
 
   private readonly appVersion: string
   private readonly pluginName: string
